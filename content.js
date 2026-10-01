@@ -38,6 +38,7 @@
   let chatStylesInjected = false;
   const deletedMsgIds = new Set();
   const bannedUsers = new Set();
+  const userModerationInfo = new Map();
   const domMsgMap = new Map();
   const recentMessagesMap = new Map();
 
@@ -263,11 +264,113 @@
   const BAN_EVENT_NAMES = new Set([
     'App\\Events\\UserBannedEvent',
     'UserBannedEvent',
+    'App\\Events\\ChatUserBannedEvent',
+    'ChatUserBannedEvent',
     'App\\Events\\UserTimedOutEvent',
     'UserTimedOutEvent',
+    'App\\Events\\ChatUserTimedOutEvent',
+    'ChatUserTimedOutEvent',
     'App\\Events\\BannedUserEvent',
-    'user.banned'
+    'BannedUserEvent',
+    'user.banned',
+    'user.timed_out',
+    'chat.user.banned',
+    'chat.user.timed_out'
   ]);
+
+  function formatDuration(diffMs) {
+    if (!diffMs || diffMs <= 0) return null;
+    const sec = Math.round(diffMs / 1000);
+    if (sec < 60) return sec + 's';
+    const min = Math.round(sec / 60);
+    if (min < 60) return min + 'm';
+    const hours = Math.round(min / 60);
+    if (hours < 24) return hours + 'h';
+    const days = Math.round(hours / 24);
+    if (days < 7) return days + 'd';
+    const weeks = Math.round(days / 7);
+    if (weeks < 5) return weeks + 'w';
+    const months = Math.round(days / 30);
+    return months + 'mo';
+  }
+
+  function parseBanOrTimeoutPayload(d, eventName = '') {
+    if (!d || typeof d !== 'object') return null;
+
+    // Target user
+    let username = null;
+    if (d.user && typeof d.user === 'object') {
+      username = d.user.username || d.user.slug || (d.user.id != null ? String(d.user.id) : null);
+    } else if (typeof d.username === 'string') {
+      username = d.username;
+    } else if (typeof d.user === 'string') {
+      username = d.user;
+    }
+    if (!username) return null;
+
+    // Moderator / Issuer
+    let moderator = null;
+    const modObj = d.banned_by || d.moderator || d.bannedBy || d.banner || d.actor || d.action_by;
+    if (modObj && typeof modObj === 'object') {
+      moderator = modObj.username || modObj.slug || null;
+    } else if (typeof modObj === 'string') {
+      moderator = modObj;
+    }
+
+    // Expiration / Duration
+    const expiresAt = d.expires_at || d.expiresAt || d.until || null;
+    const isExplicitPermanent = d.permanent === true || d.is_permanent === true || d.type === 'permanent';
+
+    let durationText = null;
+    let isTimeout = false;
+
+    const lowerEvt = String(eventName).toLowerCase();
+    if (lowerEvt.includes('time') || lowerEvt.includes('timeout')) {
+      isTimeout = true;
+    }
+
+    if (expiresAt) {
+      const expireTs = Date.parse(expiresAt);
+      if (expireTs && !isNaN(expireTs)) {
+        const diffMs = expireTs - Date.now();
+        if (diffMs > 0) {
+          durationText = formatDuration(diffMs);
+          isTimeout = true;
+        }
+      }
+    }
+
+    if (!durationText && d.duration != null) {
+      const durNum = Number(d.duration);
+      if (!isNaN(durNum) && durNum > 0) {
+        // Durations >= 60 are seconds (e.g. 300, 600, 86400); < 60 are minutes
+        const ms = durNum >= 60 ? durNum * 1000 : durNum * 60 * 1000;
+        durationText = formatDuration(ms);
+        isTimeout = true;
+      } else if (typeof d.duration === 'string') {
+        durationText = d.duration.trim();
+        isTimeout = true;
+      }
+    }
+
+    if (!isExplicitPermanent && isTimeout) {
+      return {
+        username: username.toLowerCase(),
+        displayName: username,
+        moderator: moderator || null,
+        type: 'timeout',
+        duration: durationText || 'TEMP'
+      };
+    }
+
+    return {
+      username: username.toLowerCase(),
+      displayName: username,
+      moderator: moderator || null,
+      type: 'ban',
+      duration: 'PERMA'
+    };
+  }
 
   function onFrame(raw) {
     let m;
@@ -317,16 +420,22 @@
     } catch (e) {
       return;
     }
-    const username = (d && (d.user?.username || d.username)) || null;
-    if (username) {
-      const u = String(username).toLowerCase();
-      bannedUsers.add(u);
-      if (bannedUsers.size > 1000) {
-        const oldest = bannedUsers.values().next().value;
-        bannedUsers.delete(oldest);
-      }
-      markDeletedInDomByUser(u);
+    const info = parseBanOrTimeoutPayload(d, m.event || '');
+    if (!info) return;
+
+    userModerationInfo.set(info.username, info);
+    bannedUsers.add(info.username);
+
+    if (userModerationInfo.size > 1000) {
+      const oldest = userModerationInfo.keys().next().value;
+      userModerationInfo.delete(oldest);
     }
+    if (bannedUsers.size > 1000) {
+      const oldest = bannedUsers.values().next().value;
+      bannedUsers.delete(oldest);
+    }
+
+    markModeratedInDomByUser(info.username, info);
   }
 
   function onChat(m) {
@@ -1244,18 +1353,40 @@
     const style = document.createElement('style');
     style.id = 'kfc-chat-styles';
     style.textContent = `
-      .kfc-deleted-msg {
+      .kfc-deleted-msg,
+      .kfc-ban-msg,
+      .kfc-timeout-msg {
         position: relative !important;
-        background: rgba(239, 68, 68, 0.12) !important;
-        border-left: 3px solid #ef4444 !important;
         padding-left: 6px !important;
         margin-left: -3px !important;
-        opacity: 0.85 !important;
         border-radius: 2px !important;
         transition: background 0.15s ease, opacity 0.15s ease !important;
       }
+      .kfc-deleted-msg {
+        background: rgba(239, 68, 68, 0.12) !important;
+        border-left: 3px solid #ef4444 !important;
+        opacity: 0.85 !important;
+      }
       .kfc-deleted-msg:hover {
         background: rgba(239, 68, 68, 0.22) !important;
+        opacity: 1 !important;
+      }
+      .kfc-ban-msg {
+        background: rgba(239, 68, 68, 0.15) !important;
+        border-left: 3px solid #ef4444 !important;
+        opacity: 0.88 !important;
+      }
+      .kfc-ban-msg:hover {
+        background: rgba(239, 68, 68, 0.25) !important;
+        opacity: 1 !important;
+      }
+      .kfc-timeout-msg {
+        background: rgba(245, 158, 11, 0.11) !important;
+        border-left: 3px solid #f59e0b !important;
+        opacity: 0.88 !important;
+      }
+      .kfc-timeout-msg:hover {
+        background: rgba(245, 158, 11, 0.22) !important;
         opacity: 1 !important;
       }
       .kfc-deleted-badge {
@@ -1265,23 +1396,42 @@
         font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
         font-size: 9px !important;
         font-weight: 800 !important;
-        letter-spacing: 0.05em !important;
+        letter-spacing: 0.04em !important;
         text-transform: uppercase !important;
         color: #ff6b6b !important;
         background: rgba(239, 68, 68, 0.24) !important;
         border: 1px solid rgba(239, 68, 68, 0.55) !important;
         border-radius: 3px !important;
-        padding: 1px 4px !important;
+        padding: 1px 5px !important;
         margin-right: 5px !important;
-        line-height: 1.2 !important;
+        line-height: 1.25 !important;
         user-select: none !important;
         vertical-align: middle !important;
+        white-space: nowrap !important;
+      }
+      .kfc-ban-badge {
+        color: #ff5555 !important;
+        background: rgba(239, 68, 68, 0.30) !important;
+        border: 1px solid rgba(239, 68, 68, 0.70) !important;
+      }
+      .kfc-timeout-badge {
+        color: #fbbf24 !important;
+        background: rgba(245, 158, 11, 0.24) !important;
+        border: 1px solid rgba(245, 158, 11, 0.65) !important;
       }
       .kfc-deleted-text,
       .kfc-deleted-msg > span:last-of-type,
-      .kfc-deleted-msg .break-words {
+      .kfc-ban-msg > span:last-of-type,
+      .kfc-timeout-msg > span:last-of-type,
+      .kfc-deleted-msg .break-words,
+      .kfc-ban-msg .break-words,
+      .kfc-timeout-msg .break-words {
         text-decoration: line-through !important;
         text-decoration-color: rgba(239, 68, 68, 0.85) !important;
+      }
+      .kfc-timeout-msg > span:last-of-type,
+      .kfc-timeout-msg .break-words {
+        text-decoration-color: rgba(245, 158, 11, 0.85) !important;
       }
     `;
     (document.head || document.documentElement).appendChild(style);
@@ -1320,11 +1470,36 @@
     return null;
   }
 
-  function applyDeletedStyle(node) {
+  function applyDeletedStyle(node, modInfo) {
     if (!node || node.nodeType !== 1) return;
     node.dataset.kfcDeleted = 'true';
     node.setAttribute('data-kfc-deleted', 'true');
-    node.classList.add('kfc-deleted-msg');
+
+    const user = node.dataset?.kfcUser || extractUsername(node);
+    const info = modInfo || (user ? userModerationInfo.get(user.toLowerCase()) : null);
+
+    node.classList.remove('kfc-deleted-msg', 'kfc-ban-msg', 'kfc-timeout-msg');
+
+    let badgeText = 'DELETED';
+    let badgeClass = 'kfc-deleted-badge';
+    let badgeTitle = 'This message was deleted by a moderator/bot';
+
+    if (info) {
+      if (info.type === 'timeout') {
+        node.classList.add('kfc-timeout-msg');
+        badgeClass = 'kfc-deleted-badge kfc-timeout-badge';
+        const dur = info.duration || 'TEMP';
+        badgeText = info.moderator ? `TIMEOUT ${dur} • by ${info.moderator}` : `TIMEOUT ${dur}`;
+        badgeTitle = `User timed out for ${dur}${info.moderator ? ' by ' + info.moderator : ''}`;
+      } else {
+        node.classList.add('kfc-ban-msg');
+        badgeClass = 'kfc-deleted-badge kfc-ban-badge';
+        badgeText = info.moderator ? `BANNED (PERMA) • by ${info.moderator}` : `BANNED (PERMA)`;
+        badgeTitle = `User permanently banned${info.moderator ? ' by ' + info.moderator : ''}`;
+      }
+    } else {
+      node.classList.add('kfc-deleted-msg');
+    }
 
     // Strike-through on message text spans
     const textSpans = node.querySelectorAll('span:not(.kfc-deleted-badge)');
@@ -1334,12 +1509,13 @@
       }
     }
 
-    // Add [DELETED] badge if not already present
-    if (!node.querySelector('.kfc-deleted-badge')) {
-      const badge = document.createElement('span');
-      badge.className = 'kfc-deleted-badge';
-      badge.textContent = 'DELETED';
-      badge.title = 'This message was deleted by a moderator/bot';
+    // Add or update badge
+    let badge = node.querySelector('.kfc-deleted-badge');
+    if (!badge) {
+      badge = document.createElement('span');
+      badge.className = badgeClass;
+      badge.textContent = badgeText;
+      badge.title = badgeTitle;
 
       const userBtn = node.querySelector('button.font-bold, button[class*="font-bold"], button');
       if (userBtn && userBtn.parentElement) {
@@ -1347,6 +1523,10 @@
       } else {
         node.insertBefore(badge, node.firstChild);
       }
+    } else {
+      badge.className = badgeClass;
+      badge.textContent = badgeText;
+      badge.title = badgeTitle;
     }
   }
 
@@ -1373,8 +1553,10 @@
       }
     }
 
-    // If message is already marked as deleted or sender is banned, apply styling immediately
-    if ((msgId && deletedMsgIds.has(msgId)) || (user && bannedUsers.has(user.toLowerCase()))) {
+    // If message is already marked as deleted or sender is moderated, apply styling immediately
+    if (user && userModerationInfo.has(user.toLowerCase())) {
+      applyDeletedStyle(node, userModerationInfo.get(user.toLowerCase()));
+    } else if ((msgId && deletedMsgIds.has(msgId)) || (user && bannedUsers.has(user.toLowerCase()))) {
       applyDeletedStyle(node);
     }
   }
@@ -1386,12 +1568,12 @@
     }
   }
 
-  function markDeletedInDomByUser(username) {
+  function markModeratedInDomByUser(username, info) {
     if (!chatContainer) return;
-    const lower = username.toLowerCase();
+    const lower = String(username).toLowerCase();
     for (const child of chatContainer.children) {
       if (child.nodeType === 1 && child.dataset?.kfcUser === lower) {
-        applyDeletedStyle(child);
+        applyDeletedStyle(child, info);
       }
     }
   }
@@ -1570,7 +1752,7 @@
             chatObserver = null;
             chatContainer = null;
           }
-          document.querySelectorAll('.kfc-deleted-msg').forEach((el) => el.remove());
+          document.querySelectorAll('.kfc-deleted-msg, .kfc-ban-msg, .kfc-timeout-msg').forEach((el) => el.remove());
         } else {
           ensureChatObserver();
         }

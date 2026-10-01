@@ -18,10 +18,15 @@ KEY FEATURES
 - Collapsed Sidebar Support: Automatically adapts when the Kick sidebar is collapsed into icon-only mode (~60px), displaying centered avatars with live badges and rich tooltips.
 - Rich Hover Tooltips: Hovering any live streamer reveals live viewers, active chatters in the window, API counts, and stream title.
 
-HOW DELETED CHAT MESSAGES WORK
-- Real-time DOM Preservation: A MutationObserver watches #chatroom-messages for removals. When a message is removed by a moderator or bot (or user ban), it is immediately preserved in its exact position.
-- Pusher WebSocket Interception: Listens for App\Events\MessageDeletedEvent and App\Events\UserBannedEvent over Kick's Pusher channel for the currently viewed stream to catch deletions in real time.
-- Clean Visual Indicators: Deleted messages are highlighted with a crimson tint, a 3px red left accent border, a bold [DELETED] badge, and strikethrough text, while preserving usernames and badges for full readability.
+HOW DELETED & MODERATED CHAT MESSAGES WORK
+- Real-time DOM Preservation: A MutationObserver watches #chatroom-messages for removals. When a message is removed by a moderator or bot (or user timeout/ban), it is immediately preserved in its exact position.
+- Advanced Moderation Parsing: Listens to Pusher moderation events (App\Events\UserBannedEvent, ChatUserBannedEvent, UserTimedOutEvent, ChatUserTimedOutEvent, MessageDeletedEvent).
+- Timeout vs Ban Distinction:
+  * 🟡 TIMEOUT: Displays an amber/gold badge with exact duration and moderator info (e.g., [TIMEOUT 5m • by modName] or [TIMEOUT 1w • by streamer]), along with an amber left border and strikethrough.
+  * 🔴 PERMANENT BAN: Displays a bold crimson badge (e.g., [BANNED (PERMA) • by modName]), along with a red left border and strikethrough.
+  * 🔴 SINGLE MESSAGE DELETED: Displays a red [DELETED] badge when a message was specifically deleted without a user ban.
+- Duration Calculation: Automatically calculates friendly durations from expiration timestamps or seconds (e.g., 5m, 10m, 30m, 1h, 24h, 1w).
+- Moderator Attribution: Displays the moderator or broadcaster who issued the timeout or ban right inside the badge and hover tooltip.
 - Smart Prune Detection: Natural FIFO scroll pruning from the top of the chat buffer (scrolling past 100+ messages) is distinguished from moderation deletions to avoid memory leaks.
 - Toggle in Settings: Can be enabled or disabled at any time from the extension popup.
 
