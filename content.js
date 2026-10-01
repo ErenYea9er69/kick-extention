@@ -736,47 +736,117 @@
     (document.head || document.documentElement).appendChild(s);
   }
 
-  function suppressNativeFollowing(scrollable) {
-    if (!scrollable) return;
+  function hideAndRemove(el) {
+    if (!el || el.id === 'kfc-host' || el.closest('#kfc-host')) return;
+    el.setAttribute('data-kfc-native-hidden', 'true');
+    el.style.setProperty('display', 'none', 'important');
+    el.style.setProperty('height', '0px', 'important');
+    el.style.setProperty('visibility', 'hidden', 'important');
+    try {
+      el.remove();
+    } catch (e) {}
+  }
+
+  function suppressNativeFollowing() {
     injectGlobalStyles();
 
-    const children = Array.from(scrollable.children);
-    if (!children.length) return;
+    const aside = document.querySelector('aside') || document.body;
+    if (!aside) return;
 
-    // Find the index of the Recommended section heading
-    const recIndex = children.findIndex((c) => {
-      if (c.id === 'kfc-host') return false;
-      const txt = (c.textContent || '').trim();
-      return txt.includes('Recommended') && !txt.includes('Following');
-    });
+    // 1. Find native "Following" section header in aside (not the top nav /following link, not in #kfc-host)
+    const allElements = aside.querySelectorAll('button, div, span, h2, h3, p');
+    let headerEl = null;
+    for (const el of allElements) {
+      if (el.id === 'kfc-host' || el.closest('#kfc-host')) continue;
+      if (el.tagName === 'A' && el.getAttribute('href') === '/following') continue;
+      if (el.closest('a[href="/following"]')) continue;
 
-    let inNativeFollowing = false;
+      const txt = (el.textContent || '').trim();
+      if (txt === 'Following' || txt === 'FOLLOWING') {
+        if (!txt.includes('Home') && !txt.includes('Browse') && !txt.includes('live')) {
+          headerEl = el;
+          break;
+        }
+      }
+    }
 
-    for (let i = 0; i < children.length; i++) {
-      const child = children[i];
-      if (child.id === 'kfc-host') continue;
-
-      const txt = (child.textContent || '').trim();
-
-      // Stop once we hit Recommended
-      if (recIndex !== -1 && i >= recIndex) break;
-      if (txt.includes('Recommended')) break;
-
-      // Detect native Following header
-      if (txt.includes('Following')) {
-        inNativeFollowing = true;
+    if (headerEl) {
+      const container = headerEl.closest('[scrollable="true"]') || headerEl.closest('aside') || headerEl.parentElement;
+      let sectionItem = headerEl;
+      while (sectionItem && sectionItem.parentElement && sectionItem.parentElement !== container) {
+        sectionItem = sectionItem.parentElement;
       }
 
-      // Everything before Recommended (or after native Following header) is native Following content
-      if (recIndex !== -1 || inNativeFollowing) {
-        child.setAttribute('data-kfc-native-hidden', 'true');
-        child.style.setProperty('display', 'none', 'important');
-        child.style.setProperty('height', '0px', 'important');
-        try {
-          child.remove();
-        } catch (e) {
-          /* hidden by CSS */
+      let curr = sectionItem;
+      let count = 0;
+      while (curr && curr.parentElement === container) {
+        if (count > 0 && (curr.textContent || '').includes('Recommended')) {
+          break; // Stop at Recommended
         }
+        const next = curr.nextElementSibling;
+        hideAndRemove(curr);
+        count++;
+        curr = next;
+      }
+    }
+
+    // 2. Direct scan inside scrollable container
+    const scrollable = findSidebarContainer();
+    if (scrollable) {
+      const children = Array.from(scrollable.children);
+      const recIndex = children.findIndex((c) => {
+        if (c.id === 'kfc-host') return false;
+        const txt = (c.textContent || '').trim();
+        return txt.includes('Recommended') && !txt.includes('Following');
+      });
+
+      let inNativeFollowing = false;
+      for (let i = 0; i < children.length; i++) {
+        const child = children[i];
+        if (child.id === 'kfc-host') continue;
+
+        const txt = (child.textContent || '').trim();
+        if (recIndex !== -1 && i >= recIndex) break;
+        if (txt.includes('Recommended') && !txt.includes('Following')) break;
+
+        if (txt.includes('Following') && !txt.includes('live')) {
+          inNativeFollowing = true;
+        }
+
+        if (recIndex !== -1 || inNativeFollowing) {
+          hideAndRemove(child);
+        }
+      }
+    }
+
+    // 3. Scan for any stray streamer cards or "Show More" buttons in aside that appear before Recommended
+    const strayCards = aside.querySelectorAll('button.group, a[href^="/"]');
+    for (const card of strayCards) {
+      if (card.id === 'kfc-host' || card.closest('#kfc-host')) continue;
+      // Do not touch top nav links
+      const href = card.getAttribute('href') || card.querySelector('a')?.getAttribute('href') || '';
+      if (href === '/' || href === '/browse' || href === '/following' || href.startsWith('/category')) continue;
+
+      // Check if this card appears before Recommended
+      let isAfterRecommended = false;
+      let check = card;
+      while (check && check !== aside) {
+        let prev = check.previousElementSibling;
+        while (prev) {
+          if (prev.textContent && prev.textContent.includes('Recommended')) {
+            isAfterRecommended = true;
+            break;
+          }
+          prev = prev.previousElementSibling;
+        }
+        if (isAfterRecommended) break;
+        check = check.parentElement;
+      }
+
+      // If it's in the sidebar before Recommended (or if no Recommended section exists), it's a native Following card!
+      if (!isAfterRecommended) {
+        const rowWrapper = card.closest('button.group') || card;
+        hideAndRemove(rowWrapper);
       }
     }
   }
@@ -785,7 +855,7 @@
     const scrollable = findSidebarContainer();
     if (!scrollable) return false;
 
-    suppressNativeFollowing(scrollable);
+    suppressNativeFollowing();
 
     if (!host) {
       host = document.createElement('div');
@@ -803,7 +873,7 @@
       scrollable.insertBefore(host, scrollable.firstChild);
     }
 
-    suppressNativeFollowing(scrollable);
+    suppressNativeFollowing();
 
     // Check if Kick's sidebar is in collapsed icon-only mode (~60px)
     const isSidebarCollapsed = (host.offsetWidth > 0 && host.offsetWidth < 120) || (scrollable.offsetWidth > 0 && scrollable.offsetWidth < 120);
@@ -1036,12 +1106,10 @@
         }
       }
       if (needsRecheck) {
+        suppressNativeFollowing();
         const scrollable = findSidebarContainer();
-        if (scrollable) {
-          suppressNativeFollowing(scrollable);
-          if (host == null || host.parentElement !== scrollable || scrollable.firstChild !== host) {
-            render();
-          }
+        if (scrollable && (host == null || host.parentElement !== scrollable || scrollable.firstChild !== host)) {
+          render();
         }
       }
     });
@@ -1053,11 +1121,10 @@
     const urlCheck = setInterval(() => {
       if (location.href !== lastUrl) {
         lastUrl = location.href;
-        const scrollable = findSidebarContainer();
-        if (scrollable) suppressNativeFollowing(scrollable);
+        suppressNativeFollowing();
         setTimeout(render, 300);
       }
-    }, 500);
+    }, 400);
     timers.push(urlCheck);
   }
 
@@ -1072,10 +1139,7 @@
       setInterval(render, 5000),
       setInterval(prune, 15000),
       setInterval(heartbeat, 20000),
-      setInterval(() => {
-        const s = findSidebarContainer();
-        if (s) suppressNativeFollowing(s);
-      }, 500),
+      setInterval(suppressNativeFollowing, 250),
       setInterval(() => {
         for (const ch of channels.values()) ch.apiOff = false;
       }, 600000)
