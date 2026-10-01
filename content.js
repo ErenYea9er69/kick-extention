@@ -715,41 +715,67 @@
     );
   }
 
+  function injectGlobalStyles() {
+    if (document.getElementById('kfc-global-styles')) return;
+    const s = document.createElement('style');
+    s.id = 'kfc-global-styles';
+    s.textContent = `
+      [data-kfc-native-hidden] {
+        display: none !important;
+        visibility: hidden !important;
+        height: 0px !important;
+        min-height: 0px !important;
+        max-height: 0px !important;
+        margin: 0px !important;
+        padding: 0px !important;
+        border: none !important;
+        overflow: hidden !important;
+        pointer-events: none !important;
+      }
+    `;
+    (document.head || document.documentElement).appendChild(s);
+  }
+
   function suppressNativeFollowing(scrollable) {
     if (!scrollable) return;
+    injectGlobalStyles();
 
-    // Scan for native "Following" sections inside scrollable container
-    const all = Array.from(scrollable.querySelectorAll('*'));
-    for (const node of all) {
-      if (node.id === 'kfc-host' || node.closest('#kfc-host')) continue;
-      
-      const txt = (node.textContent || '').trim();
-      // Match text that starts with Following and is a section title or header
-      if (txt === 'Following' && node.children.length === 0) {
-        // Avoid top nav button
-        if (node.closest('button[class*="group"]') && node.closest('a[href="/following"]')) continue;
-        
-        // Find top-level child of scrollable
-        let section = node;
-        while (section && section.parentElement !== scrollable && section !== scrollable) {
-          section = section.parentElement;
-        }
+    const children = Array.from(scrollable.children);
+    if (!children.length) return;
 
-        if (section && section !== scrollable && !section.id?.startsWith('kfc')) {
-          if (!section.textContent.includes('Recommended')) {
-            section.setAttribute('data-kfc-native-hidden', 'true');
-            section.style.setProperty('display', 'none', 'important');
-            continue;
-          }
-        }
+    // Find the index of the Recommended section heading
+    const recIndex = children.findIndex((c) => {
+      if (c.id === 'kfc-host') return false;
+      const txt = (c.textContent || '').trim();
+      return txt.includes('Recommended') && !txt.includes('Following');
+    });
 
-        // If elements are flat siblings inside scrollable
-        let curr = node.parentElement === scrollable ? node : node.closest('div');
-        while (curr && curr.parentElement === scrollable) {
-          if (curr.textContent.includes('Recommended') || curr.id === 'kfc-host') break;
-          curr.setAttribute('data-kfc-native-hidden', 'true');
-          curr.style.setProperty('display', 'none', 'important');
-          curr = curr.nextElementSibling;
+    let inNativeFollowing = false;
+
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
+      if (child.id === 'kfc-host') continue;
+
+      const txt = (child.textContent || '').trim();
+
+      // Stop once we hit Recommended
+      if (recIndex !== -1 && i >= recIndex) break;
+      if (txt.includes('Recommended')) break;
+
+      // Detect native Following header
+      if (txt.includes('Following')) {
+        inNativeFollowing = true;
+      }
+
+      // Everything before Recommended (or after native Following header) is native Following content
+      if (recIndex !== -1 || inNativeFollowing) {
+        child.setAttribute('data-kfc-native-hidden', 'true');
+        child.style.setProperty('display', 'none', 'important');
+        child.style.setProperty('height', '0px', 'important');
+        try {
+          child.remove();
+        } catch (e) {
+          /* hidden by CSS */
         }
       }
     }
@@ -776,6 +802,8 @@
     } else if (scrollable.firstChild !== host) {
       scrollable.insertBefore(host, scrollable.firstChild);
     }
+
+    suppressNativeFollowing(scrollable);
 
     // Check if Kick's sidebar is in collapsed icon-only mode (~60px)
     const isSidebarCollapsed = (host.offsetWidth > 0 && host.offsetWidth < 120) || (scrollable.offsetWidth > 0 && scrollable.offsetWidth < 120);
@@ -1009,8 +1037,11 @@
       }
       if (needsRecheck) {
         const scrollable = findSidebarContainer();
-        if (scrollable && (host == null || host.parentElement !== scrollable || scrollable.firstChild !== host)) {
-          render();
+        if (scrollable) {
+          suppressNativeFollowing(scrollable);
+          if (host == null || host.parentElement !== scrollable || scrollable.firstChild !== host) {
+            render();
+          }
         }
       }
     });
@@ -1022,9 +1053,11 @@
     const urlCheck = setInterval(() => {
       if (location.href !== lastUrl) {
         lastUrl = location.href;
+        const scrollable = findSidebarContainer();
+        if (scrollable) suppressNativeFollowing(scrollable);
         setTimeout(render, 300);
       }
-    }, 600);
+    }, 500);
     timers.push(urlCheck);
   }
 
@@ -1039,6 +1072,10 @@
       setInterval(render, 5000),
       setInterval(prune, 15000),
       setInterval(heartbeat, 20000),
+      setInterval(() => {
+        const s = findSidebarContainer();
+        if (s) suppressNativeFollowing(s);
+      }, 500),
       setInterval(() => {
         for (const ch of channels.values()) ch.apiOff = false;
       }, 600000)
