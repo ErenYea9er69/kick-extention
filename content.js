@@ -12,6 +12,7 @@
     mode: 'chatters',
     windowMin: 5,
     pollSec: 30,
+    showDeletedMessages: true,
     useApi: true,
     ignoreBots: true,
     bots: 'botrix,kickbot,nightbot,streamelements,fossabot,moobot,wizebot',
@@ -28,6 +29,17 @@
   let lastFollowOk = 0;
   let timers = [];
   let isExpanded = false;
+
+  // Deleted chat messages state
+  let currentViewingSlug = null;
+  let currentViewingChatroomId = null;
+  let chatContainer = null;
+  let chatObserver = null;
+  let chatStylesInjected = false;
+  const deletedMsgIds = new Set();
+  const bannedUsers = new Set();
+  const domMsgMap = new Map();
+  const recentMessagesMap = new Map();
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -240,6 +252,23 @@
     };
   }
 
+  const DELETED_EVENT_NAMES = new Set([
+    'App\\Events\\MessageDeletedEvent',
+    'MessageDeletedEvent',
+    'App\\Events\\ChatMessageDeletedEvent',
+    'ChatMessageDeletedEvent',
+    'message.deleted'
+  ]);
+
+  const BAN_EVENT_NAMES = new Set([
+    'App\\Events\\UserBannedEvent',
+    'UserBannedEvent',
+    'App\\Events\\UserTimedOutEvent',
+    'UserTimedOutEvent',
+    'App\\Events\\BannedUserEvent',
+    'user.banned'
+  ]);
+
   function onFrame(raw) {
     let m;
     try {
@@ -255,14 +284,56 @@
       wsSend({ event: 'pusher:pong', data: {} });
     } else if (m.event === 'App\\Events\\ChatMessageEvent') {
       onChat(m);
+    } else if (DELETED_EVENT_NAMES.has(m.event)) {
+      onMessageDeleted(m);
+    } else if (BAN_EVENT_NAMES.has(m.event)) {
+      onUserBanned(m);
+    }
+  }
+
+  function onMessageDeleted(m) {
+    let d;
+    try {
+      d = typeof m.data === 'string' ? JSON.parse(m.data) : m.data;
+    } catch (e) {
+      return;
+    }
+    const msgId = (d && (d.message?.id || d.id)) || null;
+    if (msgId) {
+      const idStr = String(msgId);
+      deletedMsgIds.add(idStr);
+      if (deletedMsgIds.size > 2000) {
+        const oldest = deletedMsgIds.values().next().value;
+        deletedMsgIds.delete(oldest);
+      }
+      markDeletedInDomById(idStr);
+    }
+  }
+
+  function onUserBanned(m) {
+    let d;
+    try {
+      d = typeof m.data === 'string' ? JSON.parse(m.data) : m.data;
+    } catch (e) {
+      return;
+    }
+    const username = (d && (d.user?.username || d.username)) || null;
+    if (username) {
+      const u = String(username).toLowerCase();
+      bannedUsers.add(u);
+      if (bannedUsers.size > 1000) {
+        const oldest = bannedUsers.values().next().value;
+        bannedUsers.delete(oldest);
+      }
+      markDeletedInDomByUser(u);
     }
   }
 
   function onChat(m) {
     const room = /^chatrooms\.(\d+)\.v2$/.exec(m.channel || '');
     if (!room) return;
-    const slug = roomToSlug.get(Number(room[1]));
-    if (!slug) return;
+    const chatroomId = Number(room[1]);
+    const slug = roomToSlug.get(chatroomId);
     let d;
     try {
       d = typeof m.data === 'string' ? JSON.parse(m.data) : m.data;
@@ -270,26 +341,97 @@
       return;
     }
     const u = d && d.sender;
-    if (!u) return;
-    record(slug, u.id != null ? String(u.id) : String(u.username).toLowerCase(), u.username, Date.now());
-    requestRender();
+    if (slug && u) {
+      record(slug, u.id != null ? String(u.id) : String(u.username).toLowerCase(), u.username, Date.now());
+      requestRender();
+    }
+    if (d && d.id) {
+      const msgId = String(d.id);
+      const senderName = (u && u.username) ? String(u.username).toLowerCase() : '';
+      recentMessagesMap.set(msgId, {
+        id: msgId,
+        user: senderName,
+        content: d.content || '',
+        ts: Date.now()
+      });
+      if (recentMessagesMap.size > 1000) {
+        const oldestKey = recentMessagesMap.keys().next().value;
+        recentMessagesMap.delete(oldestKey);
+      }
+    }
+  }
+
+  async function updateCurrentViewingChannel() {
+    const pathParts = location.pathname.split('/').filter(Boolean);
+    const first = (pathParts[0] || '').toLowerCase();
+    const reserved = new Set([
+      '', 'categories', 'browse', 'following', 'settings', 'dashboard',
+      'terms', 'privacy', 'community-guidelines', 'dmca', 'search',
+      'video', 'clip', 'help', 'subscriptions'
+    ]);
+    if (!first || reserved.has(first)) {
+      currentViewingSlug = null;
+      currentViewingChatroomId = null;
+      return;
+    }
+    if (currentViewingSlug === first && currentViewingChatroomId) return;
+    currentViewingSlug = first;
+
+    // Check if channel is in followed list
+    const followed = channels.get(first);
+    if (followed && followed.chatroomId) {
+      currentViewingChatroomId = followed.chatroomId;
+      roomToSlug.set(Number(currentViewingChatroomId), first);
+      syncSubs();
+      return;
+    }
+
+    // Check idCache
+    if (idCache[first] && idCache[first].chatroomId) {
+      currentViewingChatroomId = idCache[first].chatroomId;
+      roomToSlug.set(Number(currentViewingChatroomId), first);
+      syncSubs();
+      return;
+    }
+
+    // Fetch from Kick API
+    try {
+      const j = await kickGet('/api/v2/channels/' + encodeURIComponent(first));
+      if (j && j.chatroom && j.chatroom.id) {
+        currentViewingChatroomId = j.chatroom.id;
+        idCache[first] = { channelId: j.id, chatroomId: j.chatroom.id };
+        roomToSlug.set(Number(currentViewingChatroomId), first);
+        chrome.storage.local.set({ idCache });
+        syncSubs();
+      }
+    } catch (e) {
+      /* retry later */
+    }
   }
 
   function syncSubs() {
     if (!ws.ready) return;
     const want = new Map();
+    // 1. Followed live channels
     for (const ch of channels.values()) {
       if (ch.live && ch.chatroomId && want.size < MAX_ROOMS) {
         want.set('chatrooms.' + ch.chatroomId + '.v2', ch);
       }
     }
+    // 2. Currently viewed channel chatroom (ensures we catch deletions on whatever channel user is watching)
+    if (currentViewingChatroomId) {
+      const currentChName = 'chatrooms.' + currentViewingChatroomId + '.v2';
+      want.set(currentChName, { slug: currentViewingSlug, chatroomId: currentViewingChatroomId });
+    }
     for (const [name, ch] of want) {
       if (ws.subs.has(name)) continue;
       ws.subs.add(name);
-      ch.subAt = Date.now();
-      ch.coveredFrom = Date.now();
+      if (ch && ch.subAt !== undefined) {
+        ch.subAt = Date.now();
+        ch.coveredFrom = Date.now();
+        seedHistory(ch);
+      }
       wsSend({ event: 'pusher:subscribe', data: { auth: '', channel: name } });
-      seedHistory(ch);
     }
     for (const name of [...ws.subs]) {
       if (!want.has(name)) {
@@ -1092,6 +1234,268 @@
     root.appendChild(section);
   }
 
+  /* ---------- Show Deleted Chat Messages Feature ---------- */
+
+  function injectChatStyles() {
+    if (chatStylesInjected || document.getElementById('kfc-chat-styles')) {
+      chatStylesInjected = true;
+      return;
+    }
+    const style = document.createElement('style');
+    style.id = 'kfc-chat-styles';
+    style.textContent = `
+      .kfc-deleted-msg {
+        position: relative !important;
+        background: rgba(239, 68, 68, 0.12) !important;
+        border-left: 3px solid #ef4444 !important;
+        padding-left: 6px !important;
+        margin-left: -3px !important;
+        opacity: 0.85 !important;
+        border-radius: 2px !important;
+        transition: background 0.15s ease, opacity 0.15s ease !important;
+      }
+      .kfc-deleted-msg:hover {
+        background: rgba(239, 68, 68, 0.22) !important;
+        opacity: 1 !important;
+      }
+      .kfc-deleted-badge {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+        font-size: 9px !important;
+        font-weight: 800 !important;
+        letter-spacing: 0.05em !important;
+        text-transform: uppercase !important;
+        color: #ff6b6b !important;
+        background: rgba(239, 68, 68, 0.24) !important;
+        border: 1px solid rgba(239, 68, 68, 0.55) !important;
+        border-radius: 3px !important;
+        padding: 1px 4px !important;
+        margin-right: 5px !important;
+        line-height: 1.2 !important;
+        user-select: none !important;
+        vertical-align: middle !important;
+      }
+      .kfc-deleted-text,
+      .kfc-deleted-msg > span:last-of-type,
+      .kfc-deleted-msg .break-words {
+        text-decoration: line-through !important;
+        text-decoration-color: rgba(239, 68, 68, 0.85) !important;
+      }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+    chatStylesInjected = true;
+  }
+
+  function extractUsername(node) {
+    if (!node || node.nodeType !== 1) return '';
+    const btn = node.querySelector('button.font-bold, button[class*="font-bold"]');
+    if (btn && btn.textContent) return btn.textContent.trim();
+    const anyBtn = node.querySelector('button');
+    if (anyBtn && anyBtn.textContent && anyBtn.textContent.length < 30) return anyBtn.textContent.trim();
+    return '';
+  }
+
+  function extractMessageId(node) {
+    if (!node || node.nodeType !== 1) return null;
+    if (node.dataset?.kfcMsgId) return node.dataset.kfcMsgId;
+    try {
+      const fiberKey = Object.keys(node).find((k) => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+      if (fiberKey) {
+        let curr = node[fiberKey];
+        let depth = 0;
+        while (curr && depth < 10) {
+          const p = curr.memoizedProps;
+          if (p) {
+            if (p.message?.id) return String(p.message.id);
+            if (p.chatMessage?.id) return String(p.chatMessage.id);
+            if (p.id && typeof p.id === 'string' && p.id.length > 10) return String(p.id);
+          }
+          curr = curr.return;
+          depth++;
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function applyDeletedStyle(node) {
+    if (!node || node.nodeType !== 1) return;
+    node.dataset.kfcDeleted = 'true';
+    node.setAttribute('data-kfc-deleted', 'true');
+    node.classList.add('kfc-deleted-msg');
+
+    // Strike-through on message text spans
+    const textSpans = node.querySelectorAll('span:not(.kfc-deleted-badge)');
+    for (const span of textSpans) {
+      if (!span.querySelector('button') && span.textContent.trim().length > 0) {
+        span.classList.add('kfc-deleted-text');
+      }
+    }
+
+    // Add [DELETED] badge if not already present
+    if (!node.querySelector('.kfc-deleted-badge')) {
+      const badge = document.createElement('span');
+      badge.className = 'kfc-deleted-badge';
+      badge.textContent = 'DELETED';
+      badge.title = 'This message was deleted by a moderator/bot';
+
+      const userBtn = node.querySelector('button.font-bold, button[class*="font-bold"], button');
+      if (userBtn && userBtn.parentElement) {
+        userBtn.parentElement.insertBefore(badge, userBtn);
+      } else {
+        node.insertBefore(badge, node.firstChild);
+      }
+    }
+  }
+
+  function tagChatMessageNode(node) {
+    if (!node || node.nodeType !== 1) return;
+    if (node.dataset?.kfcTagged === 'true') return;
+    node.dataset.kfcTagged = 'true';
+
+    // Save snapshot of original innerHTML in case Kick modifies text in-place
+    node._kfcOriginalHtml = node.innerHTML;
+
+    const user = extractUsername(node);
+    if (user) {
+      node.dataset.kfcUser = user.toLowerCase();
+    }
+
+    const msgId = extractMessageId(node);
+    if (msgId) {
+      node.dataset.kfcMsgId = msgId;
+      domMsgMap.set(msgId, node);
+      if (domMsgMap.size > 2000) {
+        const oldest = domMsgMap.keys().next().value;
+        domMsgMap.delete(oldest);
+      }
+    }
+
+    // If message is already marked as deleted or sender is banned, apply styling immediately
+    if ((msgId && deletedMsgIds.has(msgId)) || (user && bannedUsers.has(user.toLowerCase()))) {
+      applyDeletedStyle(node);
+    }
+  }
+
+  function markDeletedInDomById(msgId) {
+    const node = domMsgMap.get(msgId);
+    if (node && node.parentNode) {
+      applyDeletedStyle(node);
+    }
+  }
+
+  function markDeletedInDomByUser(username) {
+    if (!chatContainer) return;
+    const lower = username.toLowerCase();
+    for (const child of chatContainer.children) {
+      if (child.nodeType === 1 && child.dataset?.kfcUser === lower) {
+        applyDeletedStyle(child);
+      }
+    }
+  }
+
+  function preserveDeletedMessage(node, mutation, container) {
+    applyDeletedStyle(node);
+
+    try {
+      if (mutation.nextSibling && mutation.nextSibling.parentNode === container) {
+        container.insertBefore(node, mutation.nextSibling);
+      } else if (mutation.previousSibling && mutation.previousSibling.parentNode === container) {
+        container.insertBefore(node, mutation.previousSibling.nextSibling);
+      } else {
+        container.appendChild(node);
+      }
+    } catch (e) {
+      try {
+        container.appendChild(node);
+      } catch (e2) {}
+    }
+  }
+
+  function handleRemovedChatNodes(mutation, container) {
+    if (!S.showDeletedMessages) return;
+
+    for (const node of mutation.removedNodes) {
+      if (node.nodeType !== 1) continue;
+
+      // Avoid re-inserting already-preserved deleted messages when chat buffer cleans them up
+      if (node.dataset?.kfcDeleted === 'true') continue;
+
+      const user = node.dataset?.kfcUser || extractUsername(node);
+      const msgId = node.dataset?.kfcMsgId || extractMessageId(node);
+
+      const isBanned = user && bannedUsers.has(user.toLowerCase());
+      const isDeletedId = msgId && deletedMsgIds.has(msgId);
+
+      // Natural FIFO scroll pruning check:
+      // Kick prunes from the very top (index 0) when chat buffer has >= 50 messages.
+      // If it wasn't explicitly banned or deleted by ID and it's index 0 prune, let it go.
+      const isFifoPrune = mutation.previousSibling === null && container.children.length >= 50 && !isBanned && !isDeletedId;
+
+      if (isFifoPrune) {
+        if (msgId) domMsgMap.delete(msgId);
+        continue;
+      }
+
+      // Preserving deleted message
+      preserveDeletedMessage(node, mutation, container);
+    }
+  }
+
+  function ensureChatObserver() {
+    if (!S.showDeletedMessages) {
+      if (chatObserver) {
+        chatObserver.disconnect();
+        chatObserver = null;
+        chatContainer = null;
+      }
+      return;
+    }
+
+    injectChatStyles();
+
+    const container = document.getElementById('chatroom-messages');
+    if (!container) {
+      chatContainer = null;
+      return;
+    }
+
+    if (container === chatContainer && chatObserver) {
+      return;
+    }
+
+    if (chatObserver) {
+      chatObserver.disconnect();
+    }
+
+    chatContainer = container;
+
+    // Tag existing messages
+    for (const child of container.children) {
+      if (child.nodeType === 1) tagChatMessageNode(child);
+    }
+
+    chatObserver = new MutationObserver((mutations) => {
+      if (!S.showDeletedMessages) return;
+      for (const m of mutations) {
+        if (m.type === 'childList') {
+          if (m.addedNodes.length > 0) {
+            for (const node of m.addedNodes) {
+              if (node.nodeType === 1) tagChatMessageNode(node);
+            }
+          }
+          if (m.removedNodes.length > 0) {
+            handleRemovedChatNodes(m, container);
+          }
+        }
+      }
+    });
+
+    chatObserver.observe(container, { childList: true });
+  }
+
   /* ---------- SPA Route & DOM Observers ---------- */
 
   function setupObservers() {
@@ -1107,6 +1511,7 @@
       }
       if (needsRecheck) {
         suppressNativeFollowing();
+        ensureChatObserver();
         const scrollable = findSidebarContainer();
         if (scrollable && (host == null || host.parentElement !== scrollable || scrollable.firstChild !== host)) {
           render();
@@ -1122,6 +1527,8 @@
       if (location.href !== lastUrl) {
         lastUrl = location.href;
         suppressNativeFollowing();
+        updateCurrentViewingChannel();
+        ensureChatObserver();
         setTimeout(render, 300);
       }
     }, 400);
@@ -1140,6 +1547,8 @@
       setInterval(prune, 15000),
       setInterval(heartbeat, 20000),
       setInterval(suppressNativeFollowing, 250),
+      setInterval(ensureChatObserver, 1000),
+      setInterval(updateCurrentViewingChannel, 3000),
       setInterval(() => {
         for (const ch of channels.values()) ch.apiOff = false;
       }, 600000)
@@ -1154,6 +1563,18 @@
       S[k] = v.newValue;
       if (k === 'expanded') isExpanded = !!v.newValue;
       if (k === 'pollSec') restart = true;
+      if (k === 'showDeletedMessages') {
+        if (!v.newValue) {
+          if (chatObserver) {
+            chatObserver.disconnect();
+            chatObserver = null;
+            chatContainer = null;
+          }
+          document.querySelectorAll('.kfc-deleted-msg').forEach((el) => el.remove());
+        } else {
+          ensureChatObserver();
+        }
+      }
     }
     if (restart) startTimers();
     render();
@@ -1164,6 +1585,9 @@
     isExpanded = !!S.expanded;
     const local = await chrome.storage.local.get({ idCache: {} });
     idCache = local.idCache || {};
+    injectChatStyles();
+    ensureChatObserver();
+    updateCurrentViewingChannel();
     render();
     wsConnect();
     startTimers();

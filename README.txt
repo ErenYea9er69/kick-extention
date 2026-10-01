@@ -7,6 +7,7 @@ INSTALL (Chrome, Edge, Brave, Opera)
 4. The enhanced Following section seamlessly renders directly inside Kick's left sidebar as the primary Following list.
 
 KEY FEATURES
+- Show Deleted Chat Messages: Keep deleted and banned messages visible in chat with clear visual indicators ([DELETED] red badge, strikethrough text, red left border, and subtle red tint). Never miss what was deleted or who was banned!
 - Sidebar Integration: Appears directly in Kick's left sidebar, perfectly matching Kick's native typography, dark palette, badges, and layout.
 - Native List Replacement: Non-destructively replaces/suppresses Kick's basic Following section so there are no duplicate lists.
 - Full Streamer Visibility: Displays both LIVE streamers and OFFLINE streamers with Kick's authentic offline icon.
@@ -16,6 +17,13 @@ KEY FEATURES
   * 👁️ Viewers (Kick's official live viewer count)
 - Collapsed Sidebar Support: Automatically adapts when the Kick sidebar is collapsed into icon-only mode (~60px), displaying centered avatars with live badges and rich tooltips.
 - Rich Hover Tooltips: Hovering any live streamer reveals live viewers, active chatters in the window, API counts, and stream title.
+
+HOW DELETED CHAT MESSAGES WORK
+- Real-time DOM Preservation: A MutationObserver watches #chatroom-messages for removals. When a message is removed by a moderator or bot (or user ban), it is immediately preserved in its exact position.
+- Pusher WebSocket Interception: Listens for App\Events\MessageDeletedEvent and App\Events\UserBannedEvent over Kick's Pusher channel for the currently viewed stream to catch deletions in real time.
+- Clean Visual Indicators: Deleted messages are highlighted with a crimson tint, a 3px red left accent border, a bold [DELETED] badge, and strikethrough text, while preserving usernames and badges for full readability.
+- Smart Prune Detection: Natural FIFO scroll pruning from the top of the chat buffer (scrolling past 100+ messages) is distinguished from moderation deletions to avoid memory leaks.
+- Toggle in Settings: Can be enabled or disabled at any time from the extension popup.
 
 HOW THE CHATTER RANGE WORKS
 - Low end: Count of unique users who sent a chat message inside your chat window (default 5 min), tracked via Pusher WebSocket.
