@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Kick Following Settings</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 320px;
+      background: #0b0e0f;
+      color: #fff;
+      font: 13px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      padding: 16px;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #1a1f23;
+    }
+    .logo-badge {
+      width: 22px;
+      height: 22px;
+      border-radius: 5px;
+      background: #53fc18;
+      display: grid;
+      place-items: center;
+      color: #050b06;
+      font-weight: 900;
+      font-size: 13px;
+    }
+    h1 {
+      font-size: 15px;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: -0.01em;
+    }
+    .badge {
+      margin-left: auto;
+      font-size: 10px;
+      font-weight: 700;
+      color: #53fc18;
+      background: rgba(83, 252, 24, 0.12);
+      border: 1px solid rgba(83, 252, 24, 0.28);
+      padding: 2px 6px;
+      border-radius: 999px;
+    }
+    main {
+      display: grid;
+      gap: 12px;
+    }
+    label {
+      display: grid;
+      gap: 5px;
+      font-weight: 600;
+      color: #d2d6dc;
+      font-size: 12px;
+    }
+    small {
+      font-weight: 400;
+      color: #6e7680;
+      line-height: 1.35;
+      font-size: 11px;
+    }
+    input[type=number], input[type=text], select {
+      width: 100%;
+      height: 34px;
+      background: #121619;
+      color: #fff;
+      border: 1px solid #20262b;
+      border-radius: 7px;
+      padding: 0 10px;
+      font: inherit;
+      font-size: 12px;
+      transition: border-color 0.15s ease;
+    }
+    input[type=number]:focus, input[type=text]:focus, select:focus {
+      border-color: #53fc18;
+      outline: none;
+    }
+    .check {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .check input {
+      width: 15px;
+      height: 15px;
+      accent-color: #53fc18;
+      cursor: pointer;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .btn-save {
+      height: 36px;
+      border: 0;
+      border-radius: 7px;
+      background: #53fc18;
+      color: #071306;
+      font: 700 13px inherit;
+      cursor: pointer;
+      transition: background 0.15s ease, transform 0.05s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: 4px;
+    }
+    .btn-save:hover {
+      background: #64ff2d;
+    }
+    .btn-save:active {
+      transform: scale(0.98);
+    }
+    #msg {
+      min-height: 16px;
+      color: #53fc18;
+      font-size: 11px;
+      font-weight: 600;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo-badge">K</div>
+    <h1>Following Settings</h1>
+    <span class="badge">Sidebar</span>
+  </header>
+
+  <main>
+    <label>Default Display Mode
+      <select id="mode">
+        <option value="chatters">Active Chatters (Range)</option>
+        <option value="viewers">Viewers (Official Count)</option>
+      </select>
+    </label>
+
+    <div class="row">
+      <label>Initial Channels
+        <input id="initialCount" type="number" min="2" max="25" step="1">
+        <small>Visible before Show More</small>
+      </label>
+      <label>Chat Window (min)
+        <input id="windowMin" type="number" min="1" max="30" step="1">
+        <small>Activity window</small>
+      </label>
+    </div>
+
+    <label>Refresh Interval (sec)
+      <input id="pollSec" type="number" min="15" max="120" step="5">
+    </label>
+
+    <label class="check">
+      <input id="useApi" type="checkbox">
+      <span>Use Kick active chatters API for ceiling</span>
+    </label>
+
+    <label class="check">
+      <input id="ignoreBots" type="checkbox">
+      <span>Filter out known chat bot accounts</span>
+    </label>
+
+    <label>Bot Usernames
+      <input id="bots" type="text" placeholder="botrix,kickbot,nightbot">
+      <small>Comma-separated list of known bots to exclude</small>
+    </label>
+
+    <button id="save" class="btn-save">Save Settings</button>
+    <div id="msg" role="status"></div>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>

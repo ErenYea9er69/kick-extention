@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Kick Following: Chatters or Viewers",
+  "version": "1.0.1",
+  "description": "Adds a Following panel to Kick with two display modes: active chatter range or viewer count.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://kick.com/*",
+    "https://web.kick.com/*",
+    "https://*.kick.com/*",
+    "wss://ws-us2.pusher.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://kick.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Kick Following settings",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
